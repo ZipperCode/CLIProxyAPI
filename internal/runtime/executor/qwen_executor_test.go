@@ -18,6 +18,21 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+type qwenRefreshRecorder struct {
+	calls int
+}
+
+func (r *qwenRefreshRecorder) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	r.calls++
+	cloned := auth.Clone()
+	if cloned.Metadata == nil {
+		cloned.Metadata = map[string]any{}
+	}
+	cloned.Metadata["access_token"] = "refreshed-token"
+	cloned.Metadata["refresh_token"] = "refresh-token"
+	return cloned, nil
+}
+
 func clearQwenRateLimiter() {
 	qwenRateLimiter.Lock()
 	qwenRateLimiter.requests = make(map[string][]time.Time)
@@ -182,6 +197,8 @@ func TestQwenExecutorExecuteUsesOpenAICompatibleChatCompletionsForQwenModel(t *t
 func TestQwenExecutorExecuteCoderModelUsesOpenAICompatibleChatCompletions(t *testing.T) {
 	var gotPath string
 	var gotAuth string
+	var gotDashScopeAuthType string
+	var gotStainlessLang string
 	var gotBody []byte
 	clearQwenRateLimiter()
 	t.Cleanup(clearQwenRateLimiter)
@@ -189,6 +206,8 @@ func TestQwenExecutorExecuteCoderModelUsesOpenAICompatibleChatCompletions(t *tes
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
+		gotDashScopeAuthType = r.Header.Get("X-DashScope-AuthType")
+		gotStainlessLang = r.Header.Get("X-Stainless-Lang")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"resp","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
@@ -221,11 +240,58 @@ func TestQwenExecutorExecuteCoderModelUsesOpenAICompatibleChatCompletions(t *tes
 	if gotAuth != "Bearer access-token" {
 		t.Fatalf("authorization = %q, want %q", gotAuth, "Bearer access-token")
 	}
+	if gotDashScopeAuthType != "qwen-oauth" {
+		t.Fatalf("X-DashScope-AuthType = %q, want %q", gotDashScopeAuthType, "qwen-oauth")
+	}
+	if gotStainlessLang != "" {
+		t.Fatalf("X-Stainless-Lang = %q, want empty", gotStainlessLang)
+	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "coder-model" {
 		t.Fatalf("model = %q, want %q", got, "coder-model")
 	}
+	if got := gjson.GetBytes(gotBody, "metadata.channel").String(); got != "cli" {
+		t.Fatalf("metadata.channel = %q, want %q", got, "cli")
+	}
 	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
 		t.Fatalf("response content = %q, want %q", got, "ok")
+	}
+}
+
+func TestQwenExecutorExecuteAddsEphemeralCacheControlToLastArrayMessage(t *testing.T) {
+	var gotBody []byte
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-array-cache-control",
+		Metadata: map[string]any{
+			"access_token": "access-token",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(gotBody, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("messages.1.content.0.cache_control.type = %q, want %q", got, "ephemeral")
 	}
 }
 
@@ -439,6 +505,179 @@ func TestQwenExecutorExecuteStreamDoesNotSendDoneOnScannerError(t *testing.T) {
 		if strings.Contains(p, "[DONE]") {
 			t.Fatalf("unexpected [DONE] in payloads when scanner error occurs: %v", payloads)
 		}
+	}
+}
+
+func TestQwenExecutorExecuteRefreshesAndRetriesUnauthorizedOnce(t *testing.T) {
+	var requests int
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	recorder := &qwenRefreshRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		authHeader := r.Header.Get("Authorization")
+		switch requests {
+		case 1:
+			if authHeader != "Bearer expired-token" {
+				t.Fatalf("first authorization = %q, want %q", authHeader, "Bearer expired-token")
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_api_key","message":"invalid access token or token expired","type":"invalid_request_error"}}`))
+		case 2:
+			if authHeader != "Bearer refreshed-token" {
+				t.Fatalf("second authorization = %q, want %q", authHeader, "Bearer refreshed-token")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		default:
+			t.Fatalf("unexpected request count: %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-refresh-inline",
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-token",
+			"type":          "qwen",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+		Runtime: recorder,
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if recorder.calls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", recorder.calls)
+	}
+	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
+		t.Fatalf("response content = %q, want %q", got, "ok")
+	}
+}
+
+func TestQwenExecutorExecuteStreamRefreshesAndRetriesUnauthorizedOnce(t *testing.T) {
+	var requests int
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	recorder := &qwenRefreshRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		authHeader := r.Header.Get("Authorization")
+		switch requests {
+		case 1:
+			if authHeader != "Bearer expired-token" {
+				t.Fatalf("first authorization = %q, want %q", authHeader, "Bearer expired-token")
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"session_expired","message":"session expired","type":"auth_error"}}`))
+		case 2:
+			if authHeader != "Bearer refreshed-token" {
+				t.Fatalf("second authorization = %q, want %q", authHeader, "Bearer refreshed-token")
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		default:
+			t.Fatalf("unexpected request count: %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-stream-refresh-inline",
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-token",
+			"type":          "qwen",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+		Runtime: recorder,
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+	if recorder.calls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", recorder.calls)
+	}
+	payloads, errs := drainStreamChunks(t, result.Chunks, 2*time.Second)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected stream errors: %v", errs)
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("payload count = %d, want 2", len(payloads))
+	}
+}
+
+func TestQwenExecutorExecuteDoesNotRefreshQuotaError(t *testing.T) {
+	var requests int
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	recorder := &qwenRefreshRecorder{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-no-refresh-quota",
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-token",
+			"type":          "qwen",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+		Runtime: recorder,
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err == nil {
+		t.Fatal("Execute() expected error, got nil")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("refresh calls = %d, want 0", recorder.calls)
 	}
 }
 

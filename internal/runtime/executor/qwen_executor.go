@@ -33,6 +33,10 @@ const (
 
 var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
 
+type qwenRuntimeRefresher interface {
+	Refresh(context.Context, *cliproxyauth.Auth) (*cliproxyauth.Auth, error)
+}
+
 // qwenQuotaCodes is a package-level set of error codes that indicate quota exhaustion.
 var qwenQuotaCodes = map[string]struct{}{
 	"insufficient_quota": {},
@@ -167,6 +171,26 @@ func isQwenAuthSessionError(body []byte) bool {
 		return true
 	}
 	return false
+}
+
+func isQwenAuthRetryableStatus(code int, body []byte) bool {
+	if code == http.StatusUnauthorized {
+		return true
+	}
+	if code == http.StatusForbidden && isQwenAuthSessionError(body) {
+		return true
+	}
+	return false
+}
+
+func (e *QwenExecutor) refreshInlineAuth(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("qwen executor: auth is nil")
+	}
+	if runtimeRefresher, ok := auth.Runtime.(qwenRuntimeRefresher); ok && runtimeRefresher != nil {
+		return runtimeRefresher.Refresh(ctx, auth)
+	}
+	return e.Refresh(ctx, auth)
 }
 
 // ensureQwenSystemMessage ensures the request has a single system message at the beginning.
@@ -349,62 +373,91 @@ func (e *QwenExecutor) executeLegacy(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return resp, err
 	}
-
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	body, err = ensureQwenMetadata(body)
 	if err != nil {
 		return resp, err
 	}
-	applyQwenHeaders(httpReq, token, false)
-	qwenApplyAuthCustomHeaders(httpReq, auth)
+	body, err = ensureQwenLastMessageCacheControl(body)
+	if err != nil {
+		return resp, err
+	}
+
 	var authLabel, authType, authValue string
 	if auth != nil {
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	var data []byte
+	var respHeaders http.Header
+	currentAuth := auth
+	currentToken := token
+	currentBaseURL := baseURL
+	for attempt := 0; attempt < 2; attempt++ {
+		currentURL := strings.TrimSuffix(currentBaseURL, "/") + "/chat/completions"
+		currentReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, currentURL, bytes.NewReader(body))
+		if reqErr != nil {
+			return resp, reqErr
+		}
+		applyQwenHeaders(currentReq, currentToken, false)
+		qwenApplyAuthCustomHeaders(currentReq, currentAuth)
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       currentURL,
+			Method:    http.MethodPost,
+			Headers:   currentReq.Header.Clone(),
+			Body:      body,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	defer func() {
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, currentAuth, 0)
+		httpResp, doErr := httpClient.Do(currentReq)
+		if doErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, doErr)
+			return resp, doErr
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		respBody, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
-	}()
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if readErr != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+			return resp, readErr
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, respBody)
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			data = respBody
+			respHeaders = httpResp.Header.Clone()
+			break
+		}
 
-		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		if attempt == 0 && isQwenAuthRetryableStatus(httpResp.StatusCode, respBody) {
+			updatedAuth, refreshErr := e.refreshInlineAuth(ctx, currentAuth)
+			if refreshErr == nil && updatedAuth != nil {
+				currentAuth = updatedAuth
+				auth = updatedAuth
+				currentToken, currentBaseURL = qwenCreds(updatedAuth)
+				if currentBaseURL == "" {
+					currentBaseURL = "https://portal.qwen.ai/v1"
+				}
+				continue
+			}
+		}
+
+		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, respBody)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), respBody))
+		err = statusErr{code: errCode, msg: string(respBody), retryAfter: retryAfter}
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
+
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: respHeaders}
 	return resp, nil
 }
 
@@ -455,47 +508,75 @@ func (e *QwenExecutor) executeStreamLegacy(ctx context.Context, auth *cliproxyau
 	if err != nil {
 		return nil, err
 	}
-
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	body, err = ensureQwenMetadata(body)
 	if err != nil {
 		return nil, err
 	}
-	applyQwenHeaders(httpReq, token, true)
-	qwenApplyAuthCustomHeaders(httpReq, auth)
+	body, err = ensureQwenLastMessageCacheControl(body)
+	if err != nil {
+		return nil, err
+	}
+
 	var authLabel, authType, authValue string
 	if auth != nil {
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	currentAuth := auth
+	currentToken := token
+	currentBaseURL := baseURL
+	var httpResp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		currentURL := strings.TrimSuffix(currentBaseURL, "/") + "/chat/completions"
+		currentReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, currentURL, bytes.NewReader(body))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		applyQwenHeaders(currentReq, currentToken, true)
+		qwenApplyAuthCustomHeaders(currentReq, currentAuth)
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       currentURL,
+			Method:    http.MethodPost,
+			Headers:   currentReq.Header.Clone(),
+			Body:      body,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, currentAuth, 0)
+		httpResp, err = httpClient.Do(currentReq)
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return nil, err
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			break
+		}
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-
-		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
+
+		if attempt == 0 && isQwenAuthRetryableStatus(httpResp.StatusCode, b) {
+			updatedAuth, refreshErr := e.refreshInlineAuth(ctx, currentAuth)
+			if refreshErr == nil && updatedAuth != nil {
+				currentAuth = updatedAuth
+				auth = updatedAuth
+				currentToken, currentBaseURL = qwenCreds(updatedAuth)
+				if currentBaseURL == "" {
+					currentBaseURL = "https://portal.qwen.ai/v1"
+				}
+				continue
+			}
+		}
+
+		errCode, retryAfter := wrapQwenError(ctx, httpResp.StatusCode, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
 		return nil, err
 	}
@@ -664,21 +745,70 @@ func applyQwenHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("User-Agent", qwenUserAgent)
 	r.Header["X-DashScope-UserAgent"] = []string{qwenUserAgent}
-	r.Header.Set("X-Stainless-Runtime-Version", "v22.17.0")
-	r.Header.Set("X-Stainless-Lang", "js")
-	r.Header.Set("X-Stainless-Arch", "arm64")
-	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
 	r.Header["X-DashScope-CacheControl"] = []string{"enable"}
-	r.Header.Set("X-Stainless-Retry-Count", "0")
-	r.Header.Set("X-Stainless-Os", "MacOS")
 	r.Header["X-DashScope-AuthType"] = []string{"qwen-oauth"}
-	r.Header.Set("X-Stainless-Runtime", "node")
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
 		return
 	}
 	r.Header.Set("Accept", "application/json")
+}
+
+func ensureQwenMetadata(payload []byte) ([]byte, error) {
+	if gjson.GetBytes(payload, "metadata").Exists() {
+		if channel := strings.TrimSpace(gjson.GetBytes(payload, "metadata.channel").String()); channel != "" {
+			return payload, nil
+		}
+	}
+
+	out, err := sjson.SetBytes(payload, "metadata.channel", "cli")
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set metadata.channel failed: %w", err)
+	}
+	return out, nil
+}
+
+func ensureQwenLastMessageCacheControl(payload []byte) ([]byte, error) {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload, nil
+	}
+	items := messages.Array()
+	if len(items) == 0 {
+		return payload, nil
+	}
+
+	lastIndex := len(items) - 1
+	lastContent := items[lastIndex].Get("content")
+	if !lastContent.Exists() || !lastContent.IsArray() {
+		return payload, nil
+	}
+	parts := lastContent.Array()
+	if len(parts) == 0 {
+		return payload, nil
+	}
+
+	lastTextIndex := -1
+	for i := len(parts) - 1; i >= 0; i-- {
+		if strings.EqualFold(parts[i].Get("type").String(), "text") {
+			lastTextIndex = i
+			break
+		}
+	}
+	if lastTextIndex < 0 {
+		return payload, nil
+	}
+	if strings.TrimSpace(parts[lastTextIndex].Get("cache_control.type").String()) != "" {
+		return payload, nil
+	}
+
+	path := fmt.Sprintf("messages.%d.content.%d.cache_control.type", lastIndex, lastTextIndex)
+	out, err := sjson.SetBytes(payload, path, "ephemeral")
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set last message cache_control failed: %w", err)
+	}
+	return out, nil
 }
 
 func normaliseQwenBaseURL(resourceURL string) string {

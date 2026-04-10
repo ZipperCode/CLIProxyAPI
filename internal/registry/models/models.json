@@ -2340,7 +2340,14 @@
         "max_tokens",
         "stream",
         "stop"
-      ]
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
     }
   ],
   "iflow": [

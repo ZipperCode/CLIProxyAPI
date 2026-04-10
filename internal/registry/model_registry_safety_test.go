@@ -147,3 +147,13 @@ func TestLookupModelInfoReturnsCloneForStaticDefinitions(t *testing.T) {
 		t.Fatalf("expected static lookup clone, got %+v", second)
 	}
 }
+
+func TestLookupModelInfoCoderModelIncludesThinkingSupport(t *testing.T) {
+	model := LookupModelInfo("coder-model", "qwen")
+	if model == nil {
+		t.Fatal("expected coder-model to be registered")
+	}
+	if model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+		t.Fatalf("expected coder-model to include thinking support, got %+v", model.Thinking)
+	}
+}
