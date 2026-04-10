@@ -136,3 +136,36 @@ func TestServiceRegisterModelsForAuth_QwenDoesNotPerformV2ModelSync(t *testing.T
 		t.Fatalf("expected no qwen v2 sync request, got %d", hits)
 	}
 }
+
+func TestServiceRegisterModelsForAuth_QwenDynamicCoderModelPreservesStaticThinkingSupport(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "qwen-auth-dynamic-coder-model",
+		Provider: "qwen",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{
+			"qwen_models": []map[string]any{
+				{"id": "coder-model", "name": "Qwen 3.6 Plus"},
+			},
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(auth)
+
+	model := reg.GetModelInfo("coder-model", "qwen")
+	if model == nil {
+		t.Fatal("expected coder-model to be registered")
+	}
+	if model.Thinking == nil || len(model.Thinking.Levels) == 0 {
+		t.Fatalf("expected coder-model thinking support to be preserved, got %+v", model.Thinking)
+	}
+}

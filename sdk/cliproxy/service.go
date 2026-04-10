@@ -1058,14 +1058,56 @@ func qwenDynamicModelsFromAuth(a *coreauth.Auth) []*ModelInfo {
 		if displayName == "" {
 			displayName = id
 		}
-		out = append(out, &ModelInfo{
+		model := &ModelInfo{
 			ID:          id,
 			Object:      "model",
 			Created:     time.Now().Unix(),
 			OwnedBy:     "qwen",
 			Type:        "qwen",
 			DisplayName: displayName,
-		})
+		}
+		if staticModel := registry.LookupStaticModelInfo(id); staticModel != nil {
+			if model.Object == "" {
+				model.Object = staticModel.Object
+			}
+			if model.Created == 0 {
+				model.Created = staticModel.Created
+			}
+			if model.OwnedBy == "" {
+				model.OwnedBy = staticModel.OwnedBy
+			}
+			if model.Type == "" {
+				model.Type = staticModel.Type
+			}
+			if model.DisplayName == "" {
+				model.DisplayName = staticModel.DisplayName
+			}
+			if model.Version == "" {
+				model.Version = staticModel.Version
+			}
+			if model.Description == "" {
+				model.Description = staticModel.Description
+			}
+			if model.ContextLength == 0 {
+				model.ContextLength = staticModel.ContextLength
+			}
+			if model.MaxCompletionTokens == 0 {
+				model.MaxCompletionTokens = staticModel.MaxCompletionTokens
+			}
+			if len(model.SupportedParameters) == 0 && len(staticModel.SupportedParameters) > 0 {
+				model.SupportedParameters = append([]string(nil), staticModel.SupportedParameters...)
+			}
+			if model.Thinking == nil && staticModel.Thinking != nil {
+				model.Thinking = &registry.ThinkingSupport{
+					Min:            staticModel.Thinking.Min,
+					Max:            staticModel.Thinking.Max,
+					ZeroAllowed:    staticModel.Thinking.ZeroAllowed,
+					DynamicAllowed: staticModel.Thinking.DynamicAllowed,
+					Levels:         append([]string(nil), staticModel.Thinking.Levels...),
+				}
+			}
+		}
+		out = append(out, model)
 	}
 	return out
 }
