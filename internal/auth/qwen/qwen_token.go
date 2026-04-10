@@ -1,6 +1,6 @@
 // Package qwen provides authentication and token management functionality
-// for Alibaba's Qwen AI services. It handles OAuth2 token storage, serialization,
-// and retrieval for maintaining authenticated sessions with the Qwen API.
+// for Alibaba's Qwen AI services. It stores OAuth credentials for the
+// OpenAI-compatible Qwen API flow.
 package qwen
 
 import (
@@ -13,8 +13,7 @@ import (
 )
 
 // QwenTokenStorage stores OAuth2 token information for Alibaba Qwen API authentication.
-// It maintains compatibility with the existing auth system while adding Qwen-specific fields
-// for managing access tokens, refresh tokens, and user account information.
+// The persisted contract only includes OAuth fields used by the runtime request path.
 type QwenTokenStorage struct {
 	// AccessToken is the OAuth2 access token used for authenticating API requests.
 	AccessToken string `json:"access_token"`
@@ -26,9 +25,11 @@ type QwenTokenStorage struct {
 	ResourceURL string `json:"resource_url"`
 	// Email is the Qwen account email address associated with this token.
 	Email string `json:"email"`
-	// TokenCookie stores the authentication cookie used by the Qwen web portal.
+	// TokenCookie is a legacy field from the removed Qwen V2 web-session flow.
+	// It is retained in memory for backward compatibility but not persisted.
 	TokenCookie string `json:"token_cookie,omitempty"`
-	// SessionCookies holds any additional session cookies required by Qwen.
+	// SessionCookies is a legacy field from the removed Qwen V2 web-session flow.
+	// It is retained in memory for backward compatibility but not persisted.
 	SessionCookies map[string]string `json:"session_cookies,omitempty"`
 	// Type indicates the authentication provider type, always "qwen" for this storage.
 	Type string `json:"type"`
@@ -74,8 +75,12 @@ func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
 		_ = f.Close()
 	}()
 
+	persisted := *ts
+	persisted.TokenCookie = ""
+	persisted.SessionCookies = nil
+
 	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
+	data, errMerge := misc.MergeMetadata(&persisted, ts.Metadata)
 	if errMerge != nil {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}

@@ -9,7 +9,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestQwenTokenStorageSaveTokenToFilePersistsCookieFields(t *testing.T) {
+func TestQwenTokenStorageSaveTokenToFileOmitsLegacyCookieFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "qwen-test.json")
 	storage := &QwenTokenStorage{
@@ -32,11 +32,11 @@ func TestQwenTokenStorageSaveTokenToFilePersistsCookieFields(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(data, "token_cookie").String(); got != "token-cookie" {
-		t.Fatalf("token_cookie = %q, want %q", got, "token-cookie")
+	if gjson.GetBytes(data, "token_cookie").Exists() {
+		t.Fatalf("token_cookie should be omitted, got %s", data)
 	}
-	if got := gjson.GetBytes(data, "session_cookies.refresh_token").String(); got != "session-refresh" {
-		t.Fatalf("session_cookies.refresh_token = %q, want %q", got, "session-refresh")
+	if gjson.GetBytes(data, "session_cookies").Exists() {
+		t.Fatalf("session_cookies should be omitted, got %s", data)
 	}
 }
 
