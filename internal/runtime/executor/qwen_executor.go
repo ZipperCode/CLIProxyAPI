@@ -594,19 +594,25 @@ func (e *QwenExecutor) executeStreamLegacy(ctx context.Context, auth *cliproxyau
 		for scanner.Scan() {
 			line := bytes.Clone(scanner.Bytes())
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
+			}
+			if !bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
+				continue
+			}
 			normalized := bytesTrimDataPrefix(line)
 			if len(normalized) == 0 {
 				continue
-			}
-			if detail, ok := helps.ParseOpenAIStreamUsage(normalized); ok {
-				reporter.Publish(ctx, detail)
 			}
 			if bytes.Equal(normalized, []byte("[DONE]")) {
 				if from.String() == "openai" {
 					out <- cliproxyexecutor.StreamChunk{Payload: []byte("[DONE]")}
 					continue
 				}
-				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+				chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("data: [DONE]"), &param)
 				for i := range chunks {
 					out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 				}
@@ -616,7 +622,7 @@ func (e *QwenExecutor) executeStreamLegacy(ctx context.Context, auth *cliproxyau
 				out <- cliproxyexecutor.StreamChunk{Payload: normalized}
 				continue
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, normalized, &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, line, &param)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
@@ -636,6 +642,7 @@ func (e *QwenExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel = resolveQwenUpstreamModel(auth, baseModel)
 	return e.executeLegacy(ctx, auth, req, opts, baseModel)
 }
 
@@ -670,11 +677,13 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel = resolveQwenUpstreamModel(auth, baseModel)
 	return e.executeStreamLegacy(ctx, auth, req, opts, baseModel)
 }
 
 func (e *QwenExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel = resolveQwenUpstreamModel(auth, baseModel)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -829,6 +838,44 @@ func normaliseQwenBaseURL(resourceURL string) string {
 	}
 
 	return normalized
+}
+
+func resolveQwenUpstreamModel(auth *cliproxyauth.Auth, requestedModel string) string {
+	model := strings.TrimSpace(requestedModel)
+	if !strings.EqualFold(model, "coder-model") || auth == nil || auth.Metadata == nil {
+		return model
+	}
+
+	raw, ok := auth.Metadata["qwen_models"]
+	if !ok || raw == nil {
+		return model
+	}
+
+	var items []any
+	switch val := raw.(type) {
+	case []any:
+		items = val
+	case []map[string]any:
+		items = make([]any, 0, len(val))
+		for i := range val {
+			items = append(items, val[i])
+		}
+	default:
+		return model
+	}
+
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok || entry == nil {
+			continue
+		}
+		id, _ := entry["id"].(string)
+		if strings.EqualFold(strings.TrimSpace(id), "qwen3-coder-plus") {
+			return "qwen3-coder-plus"
+		}
+	}
+
+	return model
 }
 
 func qwenCreds(a *cliproxyauth.Auth) (token, baseURL string) {

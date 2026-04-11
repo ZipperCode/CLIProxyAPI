@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -257,6 +258,47 @@ func TestQwenExecutorExecuteCoderModelUsesOpenAICompatibleChatCompletions(t *tes
 	}
 }
 
+func TestQwenExecutorExecuteCoderModelPrefersDynamicCoderPlusUpstreamModel(t *testing.T) {
+	var gotBody []byte
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-dynamic-coder-plus",
+		Metadata: map[string]any{
+			"access_token": "access-token",
+			"qwen_models": []map[string]any{
+				{"id": "qwen3.6-plus", "name": "Qwen3.6-Plus"},
+				{"id": "qwen3-coder-plus", "name": "Qwen3-Coder"},
+			},
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+	}
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "coder-model",
+		Payload: []byte(`{"model":"coder-model","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "qwen3-coder-plus" {
+		t.Fatalf("model = %q, want %q", got, "qwen3-coder-plus")
+	}
+}
+
 func TestQwenExecutorExecuteAddsEphemeralCacheControlToLastArrayMessage(t *testing.T) {
 	var gotBody []byte
 	clearQwenRateLimiter()
@@ -383,6 +425,56 @@ func TestQwenExecutorExecuteStreamUsesOpenAICompatibleChatCompletionsForQwenMode
 	}
 	if payloads[1] != "[DONE]" {
 		t.Fatalf("last payload = %q, want %q", payloads[1], "[DONE]")
+	}
+}
+
+func TestQwenExecutorExecuteStreamTranslatesClaudeChunksFromNormalizedOpenAIEvents(t *testing.T) {
+	clearQwenRateLimiter()
+	t.Cleanup(clearQwenRateLimiter)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen3-coder-plus\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"index\":0}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"qwen3-coder-plus\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"index\":0}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewQwenExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "qwen-auth-claude-stream",
+		Metadata: map[string]any{
+			"access_token": "access-token",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+		},
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "qwen3-coder-plus",
+		Payload: []byte(`{"model":"qwen3-coder-plus","max_tokens":128,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FromString("claude"),
+		OriginalRequest: []byte(`{"model":"qwen3-coder-plus","max_tokens":128,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+
+	payloads, errs := drainStreamChunks(t, result.Chunks, 2*time.Second)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected stream errors: %v", errs)
+	}
+	if len(payloads) == 0 {
+		t.Fatal("payload count = 0, want translated claude events")
+	}
+	if !strings.Contains(payloads[0], "\"type\":\"message_start\"") {
+		t.Fatalf("first payload = %q, want message_start event", payloads[0])
+	}
+	joined := strings.Join(payloads, "\n")
+	if !strings.Contains(joined, "\"type\":\"content_block_delta\"") || !strings.Contains(joined, "\"text\":\"Hello\"") {
+		t.Fatalf("joined payloads = %q, want translated text delta", joined)
 	}
 }
 
