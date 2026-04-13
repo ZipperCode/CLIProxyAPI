@@ -466,6 +466,16 @@ func RegisterRefreshLeadProvider(provider string, factory func() *time.Duration)
 
 var expireKeys = [...]string{"expired", "expire", "expires_at", "expiresAt", "expiry", "expires"}
 
+const (
+	metadataKeyAutoDisabledReason        = "auto_disabled_reason"
+	metadataKeyAutoDisabledAt            = "auto_disabled_at"
+	metadataKeyAutoRecoveryLastCheckedAt = "auto_recovery_last_checked_at"
+	metadataKeyAutoRecoveryNextCheckAt   = "auto_recovery_next_check_at"
+	metadataKeyAutoRecoveryLastResult    = "auto_recovery_last_result"
+	metadataKeyAutoRecoveryProbeProvider = "auto_recovery_probe_provider"
+	metadataKeyAutoRecoverySystemManaged = "auto_recovery_system_managed"
+)
+
 func expirationFromMap(meta map[string]any) (time.Time, bool) {
 	if meta == nil {
 		return time.Time{}, false

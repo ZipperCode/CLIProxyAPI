@@ -34,6 +34,8 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+	// AuthQuotaAutoDisable configures the automatic quota recovery scanner and probe behavior.
+	AuthQuotaAutoDisable AuthQuotaAutoDisableConfig `yaml:"auth-quota-auto-disable" json:"auth-quota-auto-disable"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
@@ -47,3 +49,30 @@ type StreamingConfig struct {
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
 }
+
+// AuthQuotaAutoDisableConfig configures the retry schedule and probe controls for quota auto-disable recovery.
+type AuthQuotaAutoDisableConfig struct {
+	Enabled              bool     `mapstructure:"enabled" yaml:"enabled"`
+	ScanIntervalSeconds  int      `mapstructure:"scan-interval" yaml:"scan-interval"`
+	InitialWaitSeconds   int      `mapstructure:"initial-recovery-wait" yaml:"initial-recovery-wait"`
+	RetryIntervalSeconds int      `mapstructure:"retry-interval" yaml:"retry-interval"`
+	MaxConcurrentProbes  int      `mapstructure:"max-concurrent-probes" yaml:"max-concurrent-probes"`
+	Providers            []string `mapstructure:"providers" yaml:"providers"`
+	ProbeURL             string   `mapstructure:"probe-url" yaml:"probe-url"`
+	ProbeMethod          string   `mapstructure:"probe-method" yaml:"probe-method"`
+	ProbeBody            string   `mapstructure:"probe-body" yaml:"probe-body"`
+	ProbeUserAgent       string   `mapstructure:"probe-user-agent" yaml:"probe-user-agent"`
+}
+
+const (
+	// DefaultAuthQuotaAutoDisableScanIntervalSeconds is the default scan interval in seconds.
+	DefaultAuthQuotaAutoDisableScanIntervalSeconds = 60
+	// DefaultAuthQuotaAutoDisableInitialWaitSeconds sets the default cooldown before the first recovery probe.
+	DefaultAuthQuotaAutoDisableInitialWaitSeconds = 6 * 60 * 60
+	// DefaultAuthQuotaAutoDisableRetryIntervalSeconds defines the default delay between retry probes.
+	DefaultAuthQuotaAutoDisableRetryIntervalSeconds = 60 * 60
+	// DefaultAuthQuotaAutoDisableMaxConcurrentProbes caps concurrent recovery probes.
+	DefaultAuthQuotaAutoDisableMaxConcurrentProbes = 1
+)
+
+var defaultAuthQuotaAutoDisableProviders = []string{"codex", "openai", "chatgpt"}

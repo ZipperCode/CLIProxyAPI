@@ -588,6 +588,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.AuthQuotaAutoDisable = AuthQuotaAutoDisableConfig{
+		ScanIntervalSeconds:  DefaultAuthQuotaAutoDisableScanIntervalSeconds,
+		InitialWaitSeconds:   DefaultAuthQuotaAutoDisableInitialWaitSeconds,
+		RetryIntervalSeconds: DefaultAuthQuotaAutoDisableRetryIntervalSeconds,
+		MaxConcurrentProbes:  DefaultAuthQuotaAutoDisableMaxConcurrentProbes,
+		Providers:            append([]string(nil), defaultAuthQuotaAutoDisableProviders...),
+	}
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
