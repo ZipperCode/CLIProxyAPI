@@ -106,3 +106,41 @@ func TestClearQuotaAutoDisableStateResetsMetadata(t *testing.T) {
 		t.Fatalf("expected metadata nil after clearing auto-disable keys, got %#v", auth.Metadata)
 	}
 }
+
+func TestSetQuotaAutoDisableStateDoesntPersistFalseSystemManaged(t *testing.T) {
+	auth := &Auth{Metadata: map[string]any{}}
+	SetQuotaAutoDisableState(auth, QuotaAutoDisableState{
+		Reason:        "quota_exhausted",
+		SystemManaged: false,
+	})
+	if _, ok := auth.Metadata[metadataKeyAutoRecoverySystemManaged]; ok {
+		t.Fatal("expected system managed key absent when false")
+	}
+}
+
+func TestSetQuotaAutoDisableStateWithZeroStateClearsMetadata(t *testing.T) {
+	auth := &Auth{Metadata: map[string]any{
+		metadataKeyAutoDisabledReason: "quota_exhausted",
+		"other":                       "keep",
+	}}
+	SetQuotaAutoDisableState(auth, QuotaAutoDisableState{})
+	if val, ok := auth.Metadata["other"]; !ok || val != "keep" {
+		t.Fatalf("expected other key preserved, got %#v", auth.Metadata)
+	}
+	if _, ok := auth.Metadata[metadataKeyAutoDisabledReason]; ok {
+		t.Fatal("expected auto-disable key cleared")
+	}
+	if len(auth.Metadata) == 1 && auth.Metadata["other"] == "keep" {
+		// metadata should remain non-nil since there was other key
+	} else if len(auth.Metadata) == 0 {
+		t.Fatalf("expected metadata to retain other key")
+	}
+}
+
+func TestSetQuotaAutoDisableStateWithZeroStateKeepsNilMetadata(t *testing.T) {
+	auth := &Auth{}
+	SetQuotaAutoDisableState(auth, QuotaAutoDisableState{})
+	if auth.Metadata != nil {
+		t.Fatalf("expected metadata to remain nil, got %#v", auth.Metadata)
+	}
+}

@@ -13,6 +13,7 @@ type QuotaAutoDisableState struct {
 }
 
 // GetQuotaAutoDisableState reads stored auto-disable metadata markers.
+// It only inspects stored metadata and does not imply the auth is currently disabled.
 func GetQuotaAutoDisableState(auth *Auth) (QuotaAutoDisableState, bool) {
 	if auth == nil || len(auth.Metadata) == 0 {
 		return QuotaAutoDisableState{}, false
@@ -48,6 +49,10 @@ func GetQuotaAutoDisableState(auth *Auth) (QuotaAutoDisableState, bool) {
 
 func SetQuotaAutoDisableState(auth *Auth, state QuotaAutoDisableState) {
 	if auth == nil {
+		return
+	}
+	if state.Reason == "" {
+		ClearQuotaAutoDisableState(auth)
 		return
 	}
 	meta := auth.Metadata
@@ -89,11 +94,12 @@ func ClearQuotaAutoDisableState(auth *Auth) {
 	}
 }
 
+// IsQuotaAutoDisabled reports whether the auth is currently marked as auto-disabled.
+// It requires the runtime Disabled flag plus the stored reason metadata, unlike GetQuotaAutoDisableState.
 func IsQuotaAutoDisabled(auth *Auth) bool {
 	if auth == nil || !auth.Disabled || len(auth.Metadata) == 0 {
 		return false
 	}
-	// IsQuotaAutoDisabled determines whether the auth is currently marked as an auto-disabled credential.
 	if reason, ok := auth.Metadata[metadataKeyAutoDisabledReason].(string); !ok || reason == "" {
 		return false
 	}
