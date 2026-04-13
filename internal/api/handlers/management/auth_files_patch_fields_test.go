@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -160,5 +161,108 @@ func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
 	}
 	if got := headersMeta["X-Kee"]; got != "1" {
 		t.Fatalf("metadata.headers.X-Kee = %#v, want %q", got, "1")
+	}
+}
+
+func TestPatchAuthFileStatus_ManualDisableClearsQuotaAutoDisableMetadata(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	seedAuthWithQuotaAutoDisable(t, manager, "codex-a.json")
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"codex-a.json","disabled":true}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.PatchAuthFileStatus(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("codex-a.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after manual disable")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth disabled, got false")
+	}
+	if got := updated.Status; got != coreauth.StatusDisabled {
+		t.Fatalf("expected status %q, got %q", coreauth.StatusDisabled, got)
+	}
+	if got := updated.StatusMessage; got != "disabled via management API" {
+		t.Fatalf("expected status_message to update, got %q", got)
+	}
+	if _, has := coreauth.GetQuotaAutoDisableState(updated); has {
+		t.Fatalf("expected quota auto-disable metadata to be cleared")
+	}
+}
+
+func TestPatchAuthFileStatus_ManualEnableClearsQuotaAutoDisableMetadata(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	seedAuthWithQuotaAutoDisable(t, manager, "codex-a.json")
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	body := `{"name":"codex-a.json","disabled":false}`
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	handler.PatchAuthFileStatus(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	updated, ok := manager.GetByID("codex-a.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth record to exist after manual enable")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth enabled, got disabled")
+	}
+	if got := updated.Status; got != coreauth.StatusActive {
+		t.Fatalf("expected status %q, got %q", coreauth.StatusActive, got)
+	}
+	if got := updated.StatusMessage; got != "" {
+		t.Fatalf("expected status_message empty, got %q", got)
+	}
+	if _, has := coreauth.GetQuotaAutoDisableState(updated); has {
+		t.Fatalf("expected quota auto-disable metadata to be cleared")
+	}
+}
+
+func seedAuthWithQuotaAutoDisable(t *testing.T, manager *coreauth.Manager, fileName string) {
+	t.Helper()
+	if manager == nil {
+		t.Fatalf("manager is required")
+	}
+	auth := &coreauth.Auth{
+		ID:        fileName,
+		FileName:  fileName,
+		Provider:  "codex",
+		Status:    coreauth.StatusDisabled,
+		Disabled:  true,
+		UpdatedAt: time.Now(),
+		CreatedAt: time.Now(),
+	}
+	coreauth.SetQuotaAutoDisableState(auth, coreauth.QuotaAutoDisableState{
+		Reason: "quota_recovery",
+	})
+
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("failed to register seed auth: %v", err)
 	}
 }

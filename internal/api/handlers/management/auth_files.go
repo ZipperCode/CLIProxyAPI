@@ -1188,6 +1188,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 	// Update disabled state
 	targetAuth.Disabled = *req.Disabled
+	coreauth.ClearQuotaAutoDisableState(targetAuth)
 	if *req.Disabled {
 		targetAuth.Status = coreauth.StatusDisabled
 		targetAuth.StatusMessage = "disabled via management API"
