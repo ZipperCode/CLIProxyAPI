@@ -37,3 +37,43 @@ func TestClearQuotaAutoDisableStateRemovesMarkers(t *testing.T) {
 		t.Fatal("expected metadata key removed")
 	}
 }
+
+func TestQuotaAutoDisableStateInvalidMetadata(t *testing.T) {
+	cases := []map[string]any{
+		{"auto_disabled_reason": ""},
+		{"auto_disabled_reason": 42},
+	}
+	for idx, meta := range cases {
+		auth := &Auth{Metadata: meta}
+		if _, ok := GetQuotaAutoDisableState(auth); ok {
+			t.Fatalf("case %d: expected invalid metadata to be rejected, got ok", idx)
+		}
+	}
+}
+
+func TestClearQuotaAutoDisableStatePreservesOtherMetadata(t *testing.T) {
+	auth := &Auth{Metadata: map[string]any{
+		metadataKeyAutoDisabledReason:        "quota_exhausted",
+		metadataKeyAutoDisabledAt:            "2026-01-01T00:00:00Z",
+		metadataKeyAutoRecoveryLastCheckedAt: "2026-01-01T01:00:00Z",
+		metadataKeyAutoRecoveryLastResult:    "quota_exhausted",
+		"custom_key":                         "keep",
+	}}
+	ClearQuotaAutoDisableState(auth)
+	for _, key := range []string{
+		metadataKeyAutoDisabledReason,
+		metadataKeyAutoDisabledAt,
+		metadataKeyAutoRecoveryLastCheckedAt,
+		metadataKeyAutoRecoveryLastResult,
+		metadataKeyAutoRecoveryNextCheckAt,
+		metadataKeyAutoRecoveryProbeProvider,
+		metadataKeyAutoRecoverySystemManaged,
+	} {
+		if _, ok := auth.Metadata[key]; ok {
+			t.Fatalf("expected %q key removed", key)
+		}
+	}
+	if val, ok := auth.Metadata["custom_key"]; !ok || val != "keep" {
+		t.Fatalf("expected custom key preserved, got %#+v", auth.Metadata["custom_key"])
+	}
+}

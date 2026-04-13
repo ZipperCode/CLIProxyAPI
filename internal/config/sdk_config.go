@@ -58,10 +58,6 @@ type AuthQuotaAutoDisableConfig struct {
 	RetryIntervalSeconds int      `mapstructure:"retry-interval" yaml:"retry-interval"`
 	MaxConcurrentProbes  int      `mapstructure:"max-concurrent-probes" yaml:"max-concurrent-probes"`
 	Providers            []string `mapstructure:"providers" yaml:"providers"`
-	ProbeURL             string   `mapstructure:"probe-url" yaml:"probe-url"`
-	ProbeMethod          string   `mapstructure:"probe-method" yaml:"probe-method"`
-	ProbeBody            string   `mapstructure:"probe-body" yaml:"probe-body"`
-	ProbeUserAgent       string   `mapstructure:"probe-user-agent" yaml:"probe-user-agent"`
 }
 
 const (
