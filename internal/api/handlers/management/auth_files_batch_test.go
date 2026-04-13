@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -193,5 +194,83 @@ func TestDeleteAuthFile_BatchQuery(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(authDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("expected auth file %s to be removed, stat err: %v", name, err)
 		}
+	}
+}
+
+func TestPatchAuthFileStatus_ClearsQuotaAutoDisableMetadataForMultipleAuths(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	seedAuthWithQuotaAutoDisable(t, manager, "alpha.json")
+	seedAuthWithQuotaAutoDisable(t, manager, "beta.json")
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+
+	cases := []struct {
+		name         string
+		authID       string
+		requestBody  string
+		expectState  bool
+		expectStatus coreauth.Status
+		expectMsg    string
+	}{
+		{
+			name:         "manual disable",
+			authID:       "alpha.json",
+			requestBody:  `{"name":"alpha.json","disabled":true}`,
+			expectState:  true,
+			expectStatus: coreauth.StatusDisabled,
+			expectMsg:    "disabled via management API",
+		},
+		{
+			name:         "manual enable",
+			authID:       "beta.json",
+			requestBody:  `{"name":"beta.json","disabled":false}`,
+			expectState:  false,
+			expectStatus: coreauth.StatusActive,
+			expectMsg:    "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(tc.requestBody))
+			req.Header.Set("Content-Type", "application/json")
+			ctx.Request = req
+
+			h.PatchAuthFileStatus(ctx)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if got, ok := payload["disabled"].(bool); !ok || got != tc.expectState {
+				t.Fatalf("expected disabled=%v, got %#v", tc.expectState, payload["disabled"])
+			}
+
+			auth, ok := manager.GetByID(tc.authID)
+			if !ok || auth == nil {
+				t.Fatalf("expected auth record to exist after patch")
+			}
+			if auth.Disabled != tc.expectState {
+				t.Fatalf("expected disabled=%v, got %v", tc.expectState, auth.Disabled)
+			}
+			if auth.Status != tc.expectStatus {
+				t.Fatalf("expected status %q, got %q", tc.expectStatus, auth.Status)
+			}
+			if auth.StatusMessage != tc.expectMsg {
+				t.Fatalf("expected status_message %q, got %q", tc.expectMsg, auth.StatusMessage)
+			}
+			if _, has := coreauth.GetQuotaAutoDisableState(auth); has {
+				t.Fatalf("expected quota auto-disable metadata to be cleared")
+			}
+		})
 	}
 }
