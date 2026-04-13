@@ -207,70 +207,76 @@ func TestPatchAuthFileStatus_ClearsQuotaAutoDisableMetadataForMultipleAuths(t *t
 	seedAuthWithQuotaAutoDisable(t, manager, "beta.json")
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
 
-	cases := []struct {
-		name         string
-		authID       string
-		requestBody  string
-		expectState  bool
-		expectStatus coreauth.Status
-		expectMsg    string
-	}{
-		{
-			name:         "manual disable",
-			authID:       "alpha.json",
-			requestBody:  `{"name":"alpha.json","disabled":true}`,
-			expectState:  true,
-			expectStatus: coreauth.StatusDisabled,
-			expectMsg:    "disabled via management API",
-		},
-		{
-			name:         "manual enable",
-			authID:       "beta.json",
-			requestBody:  `{"name":"beta.json","disabled":false}`,
-			expectState:  false,
-			expectStatus: coreauth.StatusActive,
-			expectMsg:    "",
-		},
+	runPatch := func(t *testing.T, body string, expectDisabled bool) {
+		t.Helper()
+
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		ctx.Request = req
+
+		h.PatchAuthFileStatus(ctx)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if got, ok := payload["disabled"].(bool); !ok || got != expectDisabled {
+			t.Fatalf("expected disabled=%v, got %#v", expectDisabled, payload["disabled"])
+		}
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(rec)
-			req := httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/status", strings.NewReader(tc.requestBody))
-			req.Header.Set("Content-Type", "application/json")
-			ctx.Request = req
+	runPatch(t, `{"name":"alpha.json","disabled":true}`, true)
 
-			h.PatchAuthFileStatus(ctx)
+	alpha, ok := manager.GetByID("alpha.json")
+	if !ok || alpha == nil {
+		t.Fatalf("expected alpha auth record to exist after patch")
+	}
+	if !alpha.Disabled {
+		t.Fatalf("expected alpha disabled, got false")
+	}
+	if alpha.Status != coreauth.StatusDisabled {
+		t.Fatalf("expected alpha status %q, got %q", coreauth.StatusDisabled, alpha.Status)
+	}
+	if alpha.StatusMessage != "disabled via management API" {
+		t.Fatalf("expected alpha status_message %q, got %q", "disabled via management API", alpha.StatusMessage)
+	}
+	if _, has := coreauth.GetQuotaAutoDisableState(alpha); has {
+		t.Fatalf("expected alpha quota auto-disable metadata to be cleared")
+	}
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("expected status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
-			}
+	beta, ok := manager.GetByID("beta.json")
+	if !ok || beta == nil {
+		t.Fatalf("expected beta auth record to exist before second patch")
+	}
+	if !beta.Disabled {
+		t.Fatalf("expected beta to remain disabled before second patch")
+	}
+	if _, has := coreauth.GetQuotaAutoDisableState(beta); !has {
+		t.Fatalf("expected beta quota auto-disable metadata to remain before second patch")
+	}
 
-			var payload map[string]any
-			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-				t.Fatalf("failed to decode response: %v", err)
-			}
-			if got, ok := payload["disabled"].(bool); !ok || got != tc.expectState {
-				t.Fatalf("expected disabled=%v, got %#v", tc.expectState, payload["disabled"])
-			}
+	runPatch(t, `{"name":"beta.json","disabled":false}`, false)
 
-			auth, ok := manager.GetByID(tc.authID)
-			if !ok || auth == nil {
-				t.Fatalf("expected auth record to exist after patch")
-			}
-			if auth.Disabled != tc.expectState {
-				t.Fatalf("expected disabled=%v, got %v", tc.expectState, auth.Disabled)
-			}
-			if auth.Status != tc.expectStatus {
-				t.Fatalf("expected status %q, got %q", tc.expectStatus, auth.Status)
-			}
-			if auth.StatusMessage != tc.expectMsg {
-				t.Fatalf("expected status_message %q, got %q", tc.expectMsg, auth.StatusMessage)
-			}
-			if _, has := coreauth.GetQuotaAutoDisableState(auth); has {
-				t.Fatalf("expected quota auto-disable metadata to be cleared")
-			}
-		})
+	beta, ok = manager.GetByID("beta.json")
+	if !ok || beta == nil {
+		t.Fatalf("expected beta auth record to exist after second patch")
+	}
+	if beta.Disabled {
+		t.Fatalf("expected beta enabled, got disabled")
+	}
+	if beta.Status != coreauth.StatusActive {
+		t.Fatalf("expected beta status %q, got %q", coreauth.StatusActive, beta.Status)
+	}
+	if beta.StatusMessage != "" {
+		t.Fatalf("expected beta status_message empty, got %q", beta.StatusMessage)
+	}
+	if _, has := coreauth.GetQuotaAutoDisableState(beta); has {
+		t.Fatalf("expected beta quota auto-disable metadata to be cleared after second patch")
 	}
 }
