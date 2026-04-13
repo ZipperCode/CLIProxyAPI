@@ -52,12 +52,12 @@ type StreamingConfig struct {
 
 // AuthQuotaAutoDisableConfig configures the retry schedule and probe controls for quota auto-disable recovery.
 type AuthQuotaAutoDisableConfig struct {
-	Enabled              bool     `mapstructure:"enabled" yaml:"enabled"`
-	ScanIntervalSeconds  int      `mapstructure:"scan-interval" yaml:"scan-interval"`
-	InitialWaitSeconds   int      `mapstructure:"initial-recovery-wait" yaml:"initial-recovery-wait"`
-	RetryIntervalSeconds int      `mapstructure:"retry-interval" yaml:"retry-interval"`
-	MaxConcurrentProbes  int      `mapstructure:"max-concurrent-probes" yaml:"max-concurrent-probes"`
-	Providers            []string `mapstructure:"providers" yaml:"providers"`
+	Enabled              bool     `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
+	ScanIntervalSeconds  int      `mapstructure:"scan-interval" yaml:"scan-interval" json:"scan-interval"`
+	InitialWaitSeconds   int      `mapstructure:"initial-recovery-wait" yaml:"initial-recovery-wait" json:"initial-recovery-wait"`
+	RetryIntervalSeconds int      `mapstructure:"retry-interval" yaml:"retry-interval" json:"retry-interval"`
+	MaxConcurrentProbes  int      `mapstructure:"max-concurrent-probes" yaml:"max-concurrent-probes" json:"max-concurrent-probes"`
+	Providers            []string `mapstructure:"providers" yaml:"providers" json:"providers"`
 }
 
 const (

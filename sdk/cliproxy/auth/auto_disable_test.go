@@ -30,7 +30,7 @@ func TestQuotaAutoDisableMetadataRoundTrip(t *testing.T) {
 
 func TestClearQuotaAutoDisableStateRemovesMarkers(t *testing.T) {
 	auth := &Auth{Metadata: map[string]any{
-		"auto_disabled_reason": "quota_exhausted",
+		metadataKeyAutoDisabledReason: "quota_exhausted",
 	}}
 	ClearQuotaAutoDisableState(auth)
 	if _, ok := auth.Metadata["auto_disabled_reason"]; ok {
@@ -75,5 +75,34 @@ func TestClearQuotaAutoDisableStatePreservesOtherMetadata(t *testing.T) {
 	}
 	if val, ok := auth.Metadata["custom_key"]; !ok || val != "keep" {
 		t.Fatalf("expected custom key preserved, got %#+v", auth.Metadata["custom_key"])
+	}
+}
+
+func TestIsQuotaAutoDisabledRequiresReasonAndDisabled(t *testing.T) {
+	cases := []struct {
+		auth     *Auth
+		expected bool
+	}{
+		{auth: &Auth{Disabled: true, Metadata: map[string]any{}}, expected: false},
+		{auth: &Auth{Disabled: true, Metadata: map[string]any{metadataKeyAutoDisabledReason: ""}}, expected: false},
+		{auth: &Auth{Disabled: false, Metadata: map[string]any{metadataKeyAutoDisabledReason: "quota_exhausted"}}, expected: false},
+		{auth: &Auth{Disabled: true, Metadata: map[string]any{metadataKeyAutoDisabledReason: "quota_exhausted"}}, expected: true},
+	}
+	for idx, test := range cases {
+		if got := IsQuotaAutoDisabled(test.auth); got != test.expected {
+			t.Fatalf("case %d: expected %v, got %v", idx, test.expected, got)
+		}
+	}
+}
+
+func TestClearQuotaAutoDisableStateResetsMetadata(t *testing.T) {
+	auth := &Auth{Metadata: map[string]any{
+		metadataKeyAutoDisabledReason:        "quota_exhausted",
+		metadataKeyAutoDisabledAt:            "2026-01-01T00:00:00Z",
+		metadataKeyAutoRecoveryLastCheckedAt: "2026-01-01T01:00:00Z",
+	}}
+	ClearQuotaAutoDisableState(auth)
+	if auth.Metadata != nil {
+		t.Fatalf("expected metadata nil after clearing auto-disable keys, got %#v", auth.Metadata)
 	}
 }
