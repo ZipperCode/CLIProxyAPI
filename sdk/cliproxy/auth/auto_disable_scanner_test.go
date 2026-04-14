@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -47,6 +48,7 @@ func TestClassifyQuotaProbeResult_UnknownWhenQuotaSignalMissing(t *testing.T) {
 func TestQuotaAutoDisableScanner_OnlyProcessesDueSystemDisabledAuths(t *testing.T) {
 	manager := newTestManagerWithAuths(t,
 		autoDisabledDueAuth(),
+		autoDisabledDueNotSystemManagedAuth(),
 		autoDisabledNotDueAuth(),
 		manuallyDisabledAuth(),
 	)
@@ -111,6 +113,57 @@ func TestQuotaAutoDisableScanner_StillLimitedSchedulesRetry(t *testing.T) {
 	maxNext := time.Now().UTC().Add(retryInterval + 2*time.Second)
 	if state.NextCheckAt.Before(minNext) || state.NextCheckAt.After(maxNext) {
 		t.Fatalf("expected next check within window, got %v", state.NextCheckAt)
+	}
+}
+
+func TestQuotaAutoDisableScanner_ProbeFailedSchedulesRetry(t *testing.T) {
+	cases := []struct {
+		name   string
+		prober *fakeQuotaProbeExecutor
+	}{
+		{
+			name:   "error",
+			prober: &fakeQuotaProbeExecutor{err: errors.New("probe failed")},
+		},
+		{
+			name:   "unknown",
+			prober: &fakeQuotaProbeExecutor{result: QuotaProbeUnknown},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := autoDisabledDueAuth()
+			manager := newTestManagerWithAuths(t, auth)
+			cfg := testQuotaAutoDisableConfig()
+
+			start := time.Now().UTC()
+			scanner := NewQuotaAutoDisableScanner(manager, tc.prober, cfg)
+			scanner.runOnce(context.Background())
+			updated, _ := manager.GetByID(auth.ID)
+
+			if !updated.Disabled {
+				t.Fatal("expected auth still disabled")
+			}
+			if !IsQuotaAutoDisabled(updated) {
+				t.Fatal("expected auto disable metadata")
+			}
+			state, ok := GetQuotaAutoDisableState(updated)
+			if !ok {
+				t.Fatal("expected auto disable state")
+			}
+			if state.LastCheckedAt.IsZero() {
+				t.Fatal("expected last checked updated")
+			}
+			if state.LastResult != "probe_failed" {
+				t.Fatalf("expected last result updated, got %q", state.LastResult)
+			}
+			retryInterval := time.Duration(cfg.RetryIntervalSeconds) * time.Second
+			minNext := start.Add(retryInterval)
+			maxNext := time.Now().UTC().Add(retryInterval + 2*time.Second)
+			if state.NextCheckAt.Before(minNext) || state.NextCheckAt.After(maxNext) {
+				t.Fatalf("expected next check within window, got %v", state.NextCheckAt)
+			}
+		})
 	}
 }
 
@@ -193,6 +246,26 @@ func autoDisabledNotDueAuth() *Auth {
 		LastResult:    "quota_exhausted",
 		ProbeProvider: "codex",
 		SystemManaged: true,
+	})
+	return auth
+}
+
+func autoDisabledDueNotSystemManagedAuth() *Auth {
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "auth-not-managed",
+		Provider: "codex",
+		Disabled: true,
+		Status:   StatusDisabled,
+		Metadata: map[string]any{},
+	}
+	SetQuotaAutoDisableState(auth, QuotaAutoDisableState{
+		Reason:        "quota_exhausted",
+		DisabledAt:    now.Add(-2 * time.Hour),
+		NextCheckAt:   now.Add(-1 * time.Minute),
+		LastResult:    "quota_exhausted",
+		ProbeProvider: "codex",
+		SystemManaged: false,
 	})
 	return auth
 }
