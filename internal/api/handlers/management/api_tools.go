@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,27 +114,75 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	method := strings.ToUpper(strings.TrimSpace(body.Method))
-	if method == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing method"})
-		return
-	}
-
-	urlStr := strings.TrimSpace(body.URL)
-	if urlStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing url"})
-		return
-	}
-	parsedURL, errParseURL := url.Parse(urlStr)
-	if errParseURL != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url"})
-		return
-	}
-
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
-	reqHeaders := body.Header
+	resp, errExecute := h.executeAPICall(c.Request.Context(), auth, body)
+	if errExecute != nil {
+		var callErr *apiCallError
+		if errors.As(errExecute, &callErr) {
+			c.JSON(callErr.status, gin.H{"error": callErr.message})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func firstNonEmptyString(values ...*string) string {
+	for _, v := range values {
+		if v == nil {
+			continue
+		}
+		if out := strings.TrimSpace(*v); out != "" {
+			return out
+		}
+	}
+	return ""
+}
+
+type apiCallError struct {
+	status  int
+	message string
+	err     error
+}
+
+func (e *apiCallError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return e.message
+}
+
+func newAPICallError(status int, message string, err error) error {
+	return &apiCallError{
+		status:  status,
+		message: message,
+		err:     err,
+	}
+}
+
+func (h *Handler) executeAPICall(ctx context.Context, auth *coreauth.Auth, req apiCallRequest) (apiCallResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(req.Method))
+	if method == "" {
+		return apiCallResponse{}, newAPICallError(http.StatusBadRequest, "missing method", nil)
+	}
+
+	urlStr := strings.TrimSpace(req.URL)
+	if urlStr == "" {
+		return apiCallResponse{}, newAPICallError(http.StatusBadRequest, "missing url", nil)
+	}
+	parsedURL, errParseURL := url.Parse(urlStr)
+	if errParseURL != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return apiCallResponse{}, newAPICallError(http.StatusBadRequest, "invalid url", errParseURL)
+	}
+
+	reqHeaders := req.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
 	}
@@ -147,16 +196,14 @@ func (h *Handler) APICall(c *gin.Context) {
 			continue
 		}
 		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth)
+			token, tokenErr = h.resolveTokenForAuth(ctx, auth)
 			tokenResolved = true
 		}
 		if auth != nil && token == "" {
 			if tokenErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
-				return
+				return apiCallResponse{}, newAPICallError(http.StatusBadRequest, "auth token refresh failed", tokenErr)
 			}
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
-			return
+			return apiCallResponse{}, newAPICallError(http.StatusBadRequest, "auth token not found", nil)
 		}
 		if token == "" {
 			continue
@@ -165,14 +212,13 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	var requestBody io.Reader
-	if body.Data != "" {
-		requestBody = strings.NewReader(body.Data)
+	if req.Data != "" {
+		requestBody = strings.NewReader(req.Data)
 	}
 
-	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+	callReq, errNewRequest := http.NewRequestWithContext(ctx, method, urlStr, requestBody)
 	if errNewRequest != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
-		return
+		return apiCallResponse{}, newAPICallError(http.StatusBadRequest, "failed to build request", errNewRequest)
 	}
 
 	for key, value := range reqHeaders {
@@ -180,10 +226,10 @@ func (h *Handler) APICall(c *gin.Context) {
 			hostOverride = strings.TrimSpace(value)
 			continue
 		}
-		req.Header.Set(key, value)
+		callReq.Header.Set(key, value)
 	}
 	if hostOverride != "" {
-		req.Host = hostOverride
+		callReq.Host = hostOverride
 	}
 
 	httpClient := &http.Client{
@@ -191,11 +237,10 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth)
 
-	resp, errDo := httpClient.Do(req)
+	resp, errDo := httpClient.Do(callReq)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
-		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
-		return
+		return apiCallResponse{}, newAPICallError(http.StatusBadGateway, "request failed", errDo)
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -205,27 +250,14 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
-		return
+		return apiCallResponse{}, newAPICallError(http.StatusBadGateway, "failed to read response", errReadAll)
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
+	return apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
-	})
-}
-
-func firstNonEmptyString(values ...*string) string {
-	for _, v := range values {
-		if v == nil {
-			continue
-		}
-		if out := strings.TrimSpace(*v); out != "" {
-			return out
-		}
-	}
-	return ""
+	}, nil
 }
 
 func tokenValueForAuth(auth *coreauth.Auth) string {
