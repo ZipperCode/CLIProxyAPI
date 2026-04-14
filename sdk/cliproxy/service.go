@@ -536,7 +536,25 @@ func (s *Service) resolveQuotaProbeExecutor(auth *coreauth.Auth) (coreauth.Provi
 			return executor, key, nil
 		}
 	}
+	if auth != nil {
+		s.ensureQuotaProbeExecutor(auth)
+		for _, key := range keys {
+			executor, ok := s.coreManager.Executor(key)
+			if ok && executor != nil {
+				return executor, key, nil
+			}
+		}
+	}
 	return nil, "", fmt.Errorf("quota probe: executor not found")
+}
+
+func (s *Service) ensureQuotaProbeExecutor(auth *coreauth.Auth) {
+	if s == nil || s.coreManager == nil || auth == nil {
+		return
+	}
+	clone := auth.Clone()
+	clone.Disabled = false
+	s.ensureExecutorsForAuthWithMode(clone, true)
 }
 
 func (s *Service) quotaProbeExecutorKeys(auth *coreauth.Auth) []string {
@@ -719,7 +737,6 @@ func (s *Service) Run(ctx context.Context) error {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
 	}
-	s.StartBackgroundLoops(ctx)
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -906,6 +923,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
+	s.rebindExecutors()
+	s.StartBackgroundLoops(ctx)
 
 	select {
 	case <-ctx.Done():
