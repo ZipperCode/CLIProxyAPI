@@ -49,6 +49,7 @@ func TestQuotaAutoDisableScanner_OnlyProcessesDueSystemDisabledAuths(t *testing.
 	manager := newTestManagerWithAuths(t,
 		autoDisabledDueAuth(),
 		autoDisabledDueNotSystemManagedAuth(),
+		autoDisabledDueDisallowedProviderAuth(),
 		autoDisabledNotDueAuth(),
 		manuallyDisabledAuth(),
 	)
@@ -65,6 +66,20 @@ func TestQuotaAutoDisableScanner_OnlyProcessesDueSystemDisabledAuths(t *testing.
 
 func TestQuotaAutoDisableScanner_RecoveredAuthEnabledImmediately(t *testing.T) {
 	auth := autoDisabledDueAuth()
+	auth.Unavailable = true
+	auth.NextRetryAfter = time.Now().UTC().Add(10 * time.Minute)
+	auth.Quota = QuotaState{Exceeded: true, NextRecoverAt: time.Now().UTC().Add(30 * time.Minute)}
+	auth.LastError = &Error{Code: "quota", Message: "exceeded"}
+	auth.ModelStates = map[string]*ModelState{
+		"gpt-4": {
+			Status:         StatusDisabled,
+			StatusMessage:  "cooldown",
+			Unavailable:    true,
+			NextRetryAfter: time.Now().UTC().Add(20 * time.Minute),
+			Quota:          QuotaState{Exceeded: true, NextRecoverAt: time.Now().UTC().Add(40 * time.Minute)},
+			LastError:      &Error{Code: "quota", Message: "exceeded"},
+		},
+	}
 	manager := newTestManagerWithAuths(t, auth)
 	prober := &fakeQuotaProbeExecutor{result: QuotaProbeRecovered}
 	cfg := testQuotaAutoDisableConfig()
@@ -78,6 +93,40 @@ func TestQuotaAutoDisableScanner_RecoveredAuthEnabledImmediately(t *testing.T) {
 	}
 	if IsQuotaAutoDisabled(updated) {
 		t.Fatal("expected metadata cleared")
+	}
+	if updated.Unavailable {
+		t.Fatal("expected auth available")
+	}
+	if !updated.NextRetryAfter.IsZero() {
+		t.Fatal("expected next retry cleared")
+	}
+	if updated.Quota != (QuotaState{}) {
+		t.Fatal("expected quota cleared")
+	}
+	if updated.LastError != nil {
+		t.Fatal("expected last error cleared")
+	}
+	state := updated.ModelStates["gpt-4"]
+	if state == nil {
+		t.Fatal("expected model state preserved")
+	}
+	if state.Status != StatusActive {
+		t.Fatalf("expected model status active, got %q", state.Status)
+	}
+	if state.StatusMessage != "" {
+		t.Fatal("expected model status message cleared")
+	}
+	if state.Unavailable {
+		t.Fatal("expected model available")
+	}
+	if !state.NextRetryAfter.IsZero() {
+		t.Fatal("expected model next retry cleared")
+	}
+	if state.Quota != (QuotaState{}) {
+		t.Fatal("expected model quota cleared")
+	}
+	if state.LastError != nil {
+		t.Fatal("expected model last error cleared")
 	}
 }
 
@@ -266,6 +315,26 @@ func autoDisabledDueNotSystemManagedAuth() *Auth {
 		LastResult:    "quota_exhausted",
 		ProbeProvider: "codex",
 		SystemManaged: false,
+	})
+	return auth
+}
+
+func autoDisabledDueDisallowedProviderAuth() *Auth {
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "auth-disallowed-provider",
+		Provider: "openai",
+		Disabled: true,
+		Status:   StatusDisabled,
+		Metadata: map[string]any{},
+	}
+	SetQuotaAutoDisableState(auth, QuotaAutoDisableState{
+		Reason:        "quota_exhausted",
+		DisabledAt:    now.Add(-2 * time.Hour),
+		NextCheckAt:   now.Add(-1 * time.Minute),
+		LastResult:    "quota_exhausted",
+		ProbeProvider: "openai",
+		SystemManaged: true,
 	})
 	return auth
 }

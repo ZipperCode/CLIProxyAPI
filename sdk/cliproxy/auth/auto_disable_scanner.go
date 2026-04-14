@@ -48,6 +48,9 @@ func (s *QuotaAutoDisableScanner) Start(parent context.Context) {
 	if interval <= 0 {
 		interval = time.Duration(internalconfig.DefaultAuthQuotaAutoDisableScanIntervalSeconds) * time.Second
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	go func() {
@@ -93,6 +96,9 @@ func (s *QuotaAutoDisableScanner) runOnce(ctx context.Context) {
 		if !ok || !state.SystemManaged {
 			continue
 		}
+		if !ProviderSupportsQuotaAutoDisable(auth.Provider, s.cfg.Providers) {
+			continue
+		}
 		if !isQuotaProbeDue(state.NextCheckAt, now) {
 			continue
 		}
@@ -106,6 +112,7 @@ func (s *QuotaAutoDisableScanner) runOnce(ctx context.Context) {
 			auth.Disabled = false
 			auth.Status = StatusActive
 			auth.StatusMessage = ""
+			clearAuthRuntimeAvailability(auth)
 			ClearQuotaAutoDisableState(auth)
 		case QuotaProbeStillLimited:
 			updateQuotaAutoDisableState(auth, now, now.Add(retryInterval(s.cfg)), "quota_still_limited")
@@ -156,4 +163,28 @@ func updateQuotaAutoDisableState(auth *Auth, now time.Time, nextCheck time.Time,
 	state.NextCheckAt = nextCheck
 	state.LastResult = lastResult
 	SetQuotaAutoDisableState(auth, state)
+}
+
+func clearAuthRuntimeAvailability(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	auth.Unavailable = false
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota = QuotaState{}
+	auth.LastError = nil
+	if len(auth.ModelStates) == 0 {
+		return
+	}
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		state.Status = StatusActive
+		state.StatusMessage = ""
+		state.Unavailable = false
+		state.NextRetryAfter = time.Time{}
+		state.Quota = QuotaState{}
+		state.LastError = nil
+	}
 }
