@@ -66,6 +66,7 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 支持 iFlow 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
+- 支持额度耗尽后自动禁用认证文件，并通过主动探测定期尝试恢复
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
 ## 新手入门
@@ -75,6 +76,37 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
+
+## 额度自动禁用与恢复
+
+CLIProxyAPI 现在支持在 auth（认证）额度耗尽后自动禁用对应认证文件，并在后台定期做主动探测，探测恢复后立即启用。
+
+- 只有在 `auth-quota-auto-disable.enabled` 开启，且 provider（提供方）位于 `auth-quota-auto-disable.providers` 列表中时，这个功能才会生效。
+- 管理面板里的手动禁用/恢复始终优先，手动操作会清理系统自动禁用标记。
+- 恢复探测成功后，认证文件会立即重新参与选路，不需要等下一轮全量重载。
+
+示例配置：
+
+```yaml
+auth-quota-auto-disable:
+  enabled: true
+  scan-interval: 60
+  initial-recovery-wait: 21600
+  retry-interval: 3600
+  max-concurrent-probes: 1
+  providers:
+    - "codex"
+    - "openai"
+    - "chatgpt"
+```
+
+字段说明：
+
+- `scan-interval`：后台扫描器检查“是否到达下次探测时间”的周期，单位秒。
+- `initial-recovery-wait`：额度耗尽后，到第一次主动探测前的等待时间，单位秒。
+- `retry-interval`：仍限额或探测失败后，下次再次探测前的等待时间，单位秒。
+- `max-concurrent-probes`：为后续并发探测预留；当前实现仍保持保守串行探测。
+- `providers`：允许参与自动禁用与自动恢复的 provider 列表。
 
 ## Amp CLI 支持
 

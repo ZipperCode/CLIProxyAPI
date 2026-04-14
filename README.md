@@ -66,6 +66,7 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - iFlow multi-account load balancing
 - OpenAI Codex multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- Automatic auth disable on quota exhaustion with scheduled active recovery probes
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
@@ -75,6 +76,37 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+
+## Auth Quota Auto Disable
+
+CLIProxyAPI can automatically disable an auth file after a quota-exhausted failure and then periodically probe it for recovery.
+
+- The auth is disabled only when `auth-quota-auto-disable.enabled` is `true` and the auth provider is listed in `auth-quota-auto-disable.providers`.
+- Manual disable/enable from the management panel remains authoritative. Manual actions clear the system auto-disable marker.
+- When a recovery probe succeeds, the auth is re-enabled immediately instead of waiting for another full reload cycle.
+
+Example config:
+
+```yaml
+auth-quota-auto-disable:
+  enabled: true
+  scan-interval: 60
+  initial-recovery-wait: 21600
+  retry-interval: 3600
+  max-concurrent-probes: 1
+  providers:
+    - "codex"
+    - "openai"
+    - "chatgpt"
+```
+
+Field meanings:
+
+- `scan-interval`: how often the background scanner checks for due recovery probes.
+- `initial-recovery-wait`: how long to wait after quota exhaustion before the first active recovery probe.
+- `retry-interval`: how long to wait between later probes when the auth is still limited or the probe fails.
+- `max-concurrent-probes`: reserved for scanner concurrency control; current implementation probes conservatively.
+- `providers`: which auth providers are allowed to participate in automatic disable/recovery.
 
 ## Amp CLI Support
 

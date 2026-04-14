@@ -96,6 +96,20 @@ quota-exceeded:
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
   antigravity-credits: true # Whether to retry Antigravity quota_exhausted 429s once with enabledCreditTypes=["GOOGLE_ONE_AI"]
 
+# Automatically disable auth files after quota exhaustion and retry them later with an active probe.
+# This only affects providers listed in `providers`.
+# When a disabled auth probes successfully again, it is re-enabled immediately.
+auth-quota-auto-disable:
+  enabled: false
+  scan-interval: 60
+  initial-recovery-wait: 21600
+  retry-interval: 3600
+  max-concurrent-probes: 1
+  providers:
+    - "codex"
+    - "openai"
+    - "chatgpt"
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
