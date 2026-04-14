@@ -10,6 +10,23 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
+func enabledQuotaAutoDisableConfig() *config.Config {
+	cfg := &config.Config{}
+	cfg.AuthQuotaAutoDisable.Enabled = true
+	cfg.AuthQuotaAutoDisable.Providers = []string{"codex"}
+	return cfg
+}
+
+func newTestServiceWithConfig(cfg *config.Config) *Service {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	return &Service{
+		cfg:         cfg,
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+}
+
 func TestServiceApplyCoreAuthAddOrUpdate_DeleteReAddDoesNotInheritStaleRuntimeState(t *testing.T) {
 	service := &Service{
 		cfg:         &config.Config{},

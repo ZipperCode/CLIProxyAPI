@@ -91,6 +91,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// quotaAutoDisableScanner handles background quota recovery checks.
+	quotaAutoDisableScanner *coreauth.QuotaAutoDisableScanner
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -469,6 +472,26 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+// StartBackgroundLoops starts lightweight background tasks that should run with the service.
+func (s *Service) StartBackgroundLoops(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil || !cfg.AuthQuotaAutoDisable.Enabled {
+		return
+	}
+	if s.coreManager == nil {
+		return
+	}
+	if s.quotaAutoDisableScanner == nil {
+		s.quotaAutoDisableScanner = coreauth.NewQuotaAutoDisableScanner(s.coreManager, nil, cfg.AuthQuotaAutoDisable)
+	}
+	s.quotaAutoDisableScanner.Start(ctx)
+}
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -507,6 +530,7 @@ func (s *Service) Run(ctx context.Context) error {
 			log.Warnf("failed to load auth store: %v", errLoad)
 		}
 	}
+	s.StartBackgroundLoops(ctx)
 
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -729,6 +753,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.quotaAutoDisableScanner != nil {
+			s.quotaAutoDisableScanner.Stop()
+			s.quotaAutoDisableScanner = nil
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
