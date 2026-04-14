@@ -9,24 +9,24 @@ import (
 type QuotaProbeResult int
 
 const (
-	quotaProbeUnknown QuotaProbeResult = iota
-	quotaProbeRecovered
-	quotaProbeStillLimited
+	QuotaProbeUnknown QuotaProbeResult = iota
+	QuotaProbeRecovered
+	QuotaProbeStillLimited
 )
 
 type QuotaProbeExecutor interface {
 	ProbeAuth(ctx context.Context, auth *Auth) (statusCode int, body string, err error)
 }
 
-func classifyQuotaProbeResult(statusCode int, body string) QuotaProbeResult {
+func ClassifyQuotaProbeResult(statusCode int, body string) QuotaProbeResult {
 	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
-		return quotaProbeRecovered
+		return QuotaProbeRecovered
 	}
 	if statusCode == http.StatusTooManyRequests {
 		normalized := strings.ToLower(body)
 		if strings.Contains(normalized, "usage_limit_reached") {
-			return quotaProbeStillLimited
+			return QuotaProbeStillLimited
 		}
 	}
-	return quotaProbeUnknown
+	return QuotaProbeUnknown
 }
