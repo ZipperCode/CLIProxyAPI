@@ -2143,14 +2143,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
-				cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-				if ShouldTriggerQuotaAutoDisable(auth) && quotaAutoDisableEnabledForAuth(auth, cfg) {
-					nextCheckAt := quotaAutoDisableNextCheckAt(now, cfg)
-					MarkQuotaAutoDisabled(auth, now, nextCheckAt, auth.Provider)
-					auth.Disabled = true
-					auth.Status = StatusDisabled
-					auth.StatusMessage = "disabled due to quota exhaustion"
-				}
+			}
+			cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+			if ShouldTriggerQuotaAutoDisable(auth) && quotaAutoDisableEnabledForAuth(auth, cfg) {
+				nextCheckAt := quotaAutoDisableNextCheckAt(now, cfg)
+				MarkQuotaAutoDisabled(auth, now, nextCheckAt, auth.Provider)
+				auth.Disabled = true
+				auth.Status = StatusDisabled
+				auth.StatusMessage = "disabled due to quota exhaustion"
 			}
 		}
 

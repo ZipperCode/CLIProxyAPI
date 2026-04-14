@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
@@ -244,6 +245,13 @@ func TestManager_MarkResult_QuotaExceededMarksQuotaAutoDisable(t *testing.T) {
 	if !IsQuotaAutoDisabled(updated) {
 		t.Fatal("expected auto disable metadata")
 	}
+	state, ok := GetQuotaAutoDisableState(updated)
+	if !ok {
+		t.Fatal("expected auto disable state")
+	}
+	if state.NextCheckAt.IsZero() {
+		t.Fatal("expected next check time")
+	}
 	if store.saveCalls == 0 {
 		t.Fatal("expected auth persisted")
 	}
@@ -274,4 +282,60 @@ func (s *captureStore) Save(_ context.Context, auth *Auth) (string, error) {
 
 func (s *captureStore) Delete(context.Context, string) error {
 	return nil
+}
+
+func TestManager_MarkResult_QuotaExceededWithModelMarksQuotaAutoDisable(t *testing.T) {
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
+	cfg := &internalconfig.Config{}
+	cfg.AuthQuotaAutoDisable = internalconfig.AuthQuotaAutoDisableConfig{
+		Enabled:            true,
+		InitialWaitSeconds: 600,
+		Providers:          []string{"codex"},
+	}
+	m.SetConfig(cfg)
+
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:       "codex-model",
+		Provider: "codex",
+		Metadata: map[string]any{},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	start := time.Now().UTC()
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "codex-model",
+		Provider: "codex",
+		Model:    "gpt-4",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota exhausted"},
+	})
+	end := time.Now().UTC()
+
+	updated, ok := m.GetByID("codex-model")
+	if !ok || updated == nil {
+		t.Fatal("expected auth updated")
+	}
+	if !updated.Quota.Exceeded {
+		t.Fatal("expected quota exceeded")
+	}
+	if !updated.Disabled {
+		t.Fatal("expected auth disabled")
+	}
+	state, ok := GetQuotaAutoDisableState(updated)
+	if !ok {
+		t.Fatal("expected auto disable state")
+	}
+	if state.NextCheckAt.IsZero() {
+		t.Fatal("expected next check time")
+	}
+	minNext := start.Add(time.Duration(cfg.AuthQuotaAutoDisable.InitialWaitSeconds) * time.Second)
+	maxNext := end.Add(time.Duration(cfg.AuthQuotaAutoDisable.InitialWaitSeconds) * time.Second).Add(2 * time.Second)
+	if state.NextCheckAt.Before(minNext) || state.NextCheckAt.After(maxNext) {
+		t.Fatalf("unexpected next check time: %v", state.NextCheckAt)
+	}
+	if store.saveCalls == 0 {
+		t.Fatal("expected auth persisted")
+	}
 }
