@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"testing"
-	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
@@ -206,33 +205,73 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 }
 
-func TestApplyAuthFailureState_QuotaExceededMarksQuotaAutoDisable(t *testing.T) {
-	now := time.Now().UTC()
-	auth := &Auth{
-		ID:       "codex-a",
-		Provider: "codex",
-		Metadata: map[string]any{},
-	}
-	errInfo := &Error{HTTPStatus: 429, Message: "quota exhausted"}
+func TestManager_MarkResult_QuotaExceededMarksQuotaAutoDisable(t *testing.T) {
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
 	cfg := &internalconfig.Config{}
 	cfg.AuthQuotaAutoDisable = internalconfig.AuthQuotaAutoDisableConfig{
 		Enabled:            true,
 		InitialWaitSeconds: 600,
 		Providers:          []string{"codex"},
 	}
+	m.SetConfig(cfg)
 
-	applyAuthFailureState(auth, errInfo, nil, now, cfg)
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:       "codex-a",
+		Provider: "codex",
+		Metadata: map[string]any{},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
 
-	if !auth.Quota.Exceeded {
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "codex-a",
+		Provider: "codex",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota exhausted"},
+	})
+
+	updated, ok := m.GetByID("codex-a")
+	if !ok || updated == nil {
+		t.Fatal("expected auth updated")
+	}
+	if !updated.Quota.Exceeded {
 		t.Fatal("expected quota exceeded")
 	}
-	if !ShouldTriggerQuotaAutoDisable(auth) {
-		t.Fatal("expected auto disable trigger")
-	}
-	if !auth.Disabled {
+	if !updated.Disabled {
 		t.Fatal("expected auth disabled")
 	}
-	if !IsQuotaAutoDisabled(auth) {
+	if !IsQuotaAutoDisabled(updated) {
 		t.Fatal("expected auto disable metadata")
 	}
+	if store.saveCalls == 0 {
+		t.Fatal("expected auth persisted")
+	}
+	if store.lastSaved == nil || !store.lastSaved.Disabled || !IsQuotaAutoDisabled(store.lastSaved) {
+		t.Fatal("expected persisted auth auto disabled")
+	}
+}
+
+type captureStore struct {
+	saveCalls int
+	lastSaved *Auth
+}
+
+func (s *captureStore) List(context.Context) ([]*Auth, error) {
+	return nil, nil
+}
+
+func (s *captureStore) Save(_ context.Context, auth *Auth) (string, error) {
+	s.saveCalls++
+	if auth != nil {
+		s.lastSaved = auth.Clone()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	return auth.ID, nil
+}
+
+func (s *captureStore) Delete(context.Context, string) error {
+	return nil
 }

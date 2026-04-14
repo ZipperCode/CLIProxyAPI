@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -62,30 +63,43 @@ func TestUpdateAggregatedAvailability_FutureNextRetryBlocksAuth(t *testing.T) {
 	}
 }
 
-func TestApplyAuthFailureState_UnsupportedProviderSkipsQuotaAutoDisable(t *testing.T) {
-	now := time.Now().UTC()
-	auth := &Auth{
-		ID:       "codex-b",
-		Provider: "unsupported",
-		Metadata: map[string]any{},
-	}
-	errInfo := &Error{HTTPStatus: 429, Message: "quota exhausted"}
+func TestManager_MarkResult_UnsupportedProviderSkipsQuotaAutoDisable(t *testing.T) {
+	store := &captureStore{}
+	m := NewManager(store, nil, nil)
 	cfg := &internalconfig.Config{}
 	cfg.AuthQuotaAutoDisable = internalconfig.AuthQuotaAutoDisableConfig{
 		Enabled:            true,
 		InitialWaitSeconds: 600,
 		Providers:          []string{"codex"},
 	}
+	m.SetConfig(cfg)
 
-	applyAuthFailureState(auth, errInfo, nil, now, cfg)
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:       "codex-b",
+		Provider: "unsupported",
+		Metadata: map[string]any{},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
 
-	if !auth.Quota.Exceeded {
+	m.MarkResult(context.Background(), Result{
+		AuthID:   "codex-b",
+		Provider: "unsupported",
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota exhausted"},
+	})
+
+	updated, ok := m.GetByID("codex-b")
+	if !ok || updated == nil {
+		t.Fatal("expected auth updated")
+	}
+	if !updated.Quota.Exceeded {
 		t.Fatal("expected quota exceeded")
 	}
-	if auth.Disabled {
+	if updated.Disabled {
 		t.Fatal("expected auth not disabled")
 	}
-	if IsQuotaAutoDisabled(auth) {
+	if IsQuotaAutoDisabled(updated) {
 		t.Fatal("expected no auto disable metadata")
 	}
 }

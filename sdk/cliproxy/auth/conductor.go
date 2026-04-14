@@ -2142,8 +2142,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 				cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, cfg)
+				if ShouldTriggerQuotaAutoDisable(auth) && quotaAutoDisableEnabledForAuth(auth, cfg) {
+					nextCheckAt := quotaAutoDisableNextCheckAt(now, cfg)
+					MarkQuotaAutoDisabled(auth, now, nextCheckAt, auth.Provider)
+					auth.Disabled = true
+					auth.Status = StatusDisabled
+					auth.StatusMessage = "disabled due to quota exhaustion"
+				}
 			}
 		}
 
@@ -2563,7 +2570,7 @@ func MarkQuotaAutoDisabled(auth *Auth, now time.Time, nextCheckAt time.Time, pro
 	})
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, cfg *internalconfig.Config) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
 	}
@@ -2621,13 +2628,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-		if ShouldTriggerQuotaAutoDisable(auth) && quotaAutoDisableEnabledForAuth(auth, cfg) {
-			nextCheckAt := quotaAutoDisableNextCheckAt(now, cfg)
-			MarkQuotaAutoDisabled(auth, now, nextCheckAt, auth.Provider)
-			auth.Disabled = true
-			auth.Status = StatusDisabled
-			auth.StatusMessage = "disabled due to quota exhaustion"
-		}
 	case 408, 500, 502, 503, 504:
 		auth.StatusMessage = "transient upstream error"
 		if disableCooling {
