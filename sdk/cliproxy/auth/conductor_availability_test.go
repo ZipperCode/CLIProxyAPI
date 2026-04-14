@@ -3,6 +3,8 @@ package auth
 import (
 	"testing"
 	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAuth(t *testing.T) {
@@ -57,5 +59,33 @@ func TestUpdateAggregatedAvailability_FutureNextRetryBlocksAuth(t *testing.T) {
 	}
 	if auth.NextRetryAfter.Sub(next) > time.Second || next.Sub(auth.NextRetryAfter) > time.Second {
 		t.Fatalf("auth.NextRetryAfter = %v, want %v", auth.NextRetryAfter, next)
+	}
+}
+
+func TestApplyAuthFailureState_UnsupportedProviderSkipsQuotaAutoDisable(t *testing.T) {
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "codex-b",
+		Provider: "unsupported",
+		Metadata: map[string]any{},
+	}
+	errInfo := &Error{HTTPStatus: 429, Message: "quota exhausted"}
+	cfg := &internalconfig.Config{}
+	cfg.AuthQuotaAutoDisable = internalconfig.AuthQuotaAutoDisableConfig{
+		Enabled:            true,
+		InitialWaitSeconds: 600,
+		Providers:          []string{"codex"},
+	}
+
+	applyAuthFailureState(auth, errInfo, nil, now, cfg)
+
+	if !auth.Quota.Exceeded {
+		t.Fatal("expected quota exceeded")
+	}
+	if auth.Disabled {
+		t.Fatal("expected auth not disabled")
+	}
+	if IsQuotaAutoDisabled(auth) {
+		t.Fatal("expected no auto disable metadata")
 	}
 }

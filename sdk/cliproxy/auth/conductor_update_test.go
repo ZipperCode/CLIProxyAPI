@@ -3,6 +3,9 @@ package auth
 import (
 	"context"
 	"testing"
+	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 )
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
@@ -200,5 +203,36 @@ func TestManager_Update_ActiveInheritsModelStates(t *testing.T) {
 	}
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("expected BackoffLevel to be %d, got %d", backoffLevel, state.Quota.BackoffLevel)
+	}
+}
+
+func TestApplyAuthFailureState_QuotaExceededMarksQuotaAutoDisable(t *testing.T) {
+	now := time.Now().UTC()
+	auth := &Auth{
+		ID:       "codex-a",
+		Provider: "codex",
+		Metadata: map[string]any{},
+	}
+	errInfo := &Error{HTTPStatus: 429, Message: "quota exhausted"}
+	cfg := &internalconfig.Config{}
+	cfg.AuthQuotaAutoDisable = internalconfig.AuthQuotaAutoDisableConfig{
+		Enabled:            true,
+		InitialWaitSeconds: 600,
+		Providers:          []string{"codex"},
+	}
+
+	applyAuthFailureState(auth, errInfo, nil, now, cfg)
+
+	if !auth.Quota.Exceeded {
+		t.Fatal("expected quota exceeded")
+	}
+	if !ShouldTriggerQuotaAutoDisable(auth) {
+		t.Fatal("expected auto disable trigger")
+	}
+	if !auth.Disabled {
+		t.Fatal("expected auth disabled")
+	}
+	if !IsQuotaAutoDisabled(auth) {
+		t.Fatal("expected auto disable metadata")
 	}
 }
