@@ -7,12 +7,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -27,6 +31,13 @@ import (
 )
 
 var qwenStaticPinnedModelIDs = []string{"coder-model"}
+
+type quotaAutoDisableScanner interface {
+	Start(context.Context)
+	Stop()
+}
+
+type quotaAutoDisableScannerFactory func(manager *coreauth.Manager, prober coreauth.QuotaProbeExecutor, cfg internalconfig.AuthQuotaAutoDisableConfig) quotaAutoDisableScanner
 
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
@@ -93,7 +104,10 @@ type Service struct {
 	wsGateway *wsrelay.Manager
 
 	// quotaAutoDisableScanner handles background quota recovery checks.
-	quotaAutoDisableScanner *coreauth.QuotaAutoDisableScanner
+	quotaAutoDisableScanner quotaAutoDisableScanner
+
+	// quotaAutoDisableScannerFactory allows tests to inject a scanner implementation.
+	quotaAutoDisableScannerFactory quotaAutoDisableScannerFactory
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -472,6 +486,175 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+type serviceQuotaProbeExecutor struct {
+	service *Service
+}
+
+func (p *serviceQuotaProbeExecutor) ProbeAuth(ctx context.Context, auth *coreauth.Auth) (int, string, error) {
+	if p == nil || p.service == nil {
+		return 0, "", fmt.Errorf("quota probe: service is nil")
+	}
+	if auth == nil {
+		return 0, "", fmt.Errorf("quota probe: auth is nil")
+	}
+	executor, _, err := p.service.resolveQuotaProbeExecutor(auth)
+	if err != nil {
+		return 0, "", err
+	}
+	probeURL, err := p.service.resolveQuotaProbeURL(auth)
+	if err != nil {
+		return 0, "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	resp, err := executor.HttpRequest(ctx, auth, req)
+	if err != nil {
+		return 0, "", err
+	}
+	if resp == nil {
+		return 0, "", fmt.Errorf("quota probe: empty response")
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("quota probe: failed to close response body: %v", errClose)
+		}
+	}()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	return resp.StatusCode, string(body), nil
+}
+
+func (s *Service) resolveQuotaProbeExecutor(auth *coreauth.Auth) (coreauth.ProviderExecutor, string, error) {
+	if s == nil || s.coreManager == nil {
+		return nil, "", fmt.Errorf("quota probe: manager unavailable")
+	}
+	keys := s.quotaProbeExecutorKeys(auth)
+	for _, key := range keys {
+		executor, ok := s.coreManager.Executor(key)
+		if ok && executor != nil {
+			return executor, key, nil
+		}
+	}
+	return nil, "", fmt.Errorf("quota probe: executor not found")
+}
+
+func (s *Service) quotaProbeExecutorKeys(auth *coreauth.Auth) []string {
+	keys := make([]string, 0, 4)
+	add := func(key string) {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return
+		}
+		for _, existing := range keys {
+			if existing == key {
+				return
+			}
+		}
+		keys = append(keys, key)
+	}
+	if auth != nil {
+		add(auth.Provider)
+	}
+	if providerKey, compatName, ok := openAICompatInfoFromAuth(auth); ok {
+		add(providerKey)
+		add(compatName)
+		add("openai-compatibility")
+	}
+	return keys
+}
+
+func (s *Service) resolveQuotaProbeURL(auth *coreauth.Auth) (string, error) {
+	baseURL := s.resolveQuotaProbeBaseURL(auth)
+	if baseURL == "" {
+		return "", fmt.Errorf("quota probe: base url missing")
+	}
+	return buildQuotaProbeURL(baseURL)
+}
+
+func (s *Service) resolveQuotaProbeBaseURL(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if base := strings.TrimSpace(auth.Attributes["base_url"]); base != "" {
+			return base
+		}
+	}
+	if s != nil && s.cfg != nil {
+		if providerKey, compatName, ok := openAICompatInfoFromAuth(auth); ok {
+			if entry := s.resolveOpenAICompatConfig(providerKey, compatName); entry != nil {
+				if base := strings.TrimSpace(entry.BaseURL); base != "" {
+					return base
+				}
+			}
+		}
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		switch provider {
+		case "codex":
+			if entry := s.resolveConfigCodexKey(auth); entry != nil {
+				return strings.TrimSpace(entry.BaseURL)
+			}
+		case "claude":
+			if entry := s.resolveConfigClaudeKey(auth); entry != nil {
+				return strings.TrimSpace(entry.BaseURL)
+			}
+		case "gemini":
+			if entry := s.resolveConfigGeminiKey(auth); entry != nil {
+				return strings.TrimSpace(entry.BaseURL)
+			}
+		case "vertex":
+			if entry := s.resolveConfigVertexCompatKey(auth); entry != nil {
+				return strings.TrimSpace(entry.BaseURL)
+			}
+		}
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	switch provider {
+	case "codex", "openai", "chatgpt", "openai-compatibility":
+		return "https://api.openai.com"
+	default:
+		return ""
+	}
+}
+
+func (s *Service) resolveOpenAICompatConfig(providerKey, compatName string) *config.OpenAICompatibility {
+	if s == nil || s.cfg == nil {
+		return nil
+	}
+	candidates := []string{compatName, providerKey}
+	for i := range s.cfg.OpenAICompatibility {
+		entry := &s.cfg.OpenAICompatibility[i]
+		for _, candidate := range candidates {
+			if candidate != "" && strings.EqualFold(strings.TrimSpace(entry.Name), candidate) {
+				return entry
+			}
+		}
+	}
+	return nil
+}
+
+func buildQuotaProbeURL(baseURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	switch {
+	case strings.HasSuffix(path, "/v1/models"):
+		parsed.Path = path
+	case strings.HasSuffix(path, "/v1"):
+		parsed.Path = path + "/models"
+	default:
+		if path == "" {
+			parsed.Path = "/v1/models"
+		} else {
+			parsed.Path = path + "/v1/models"
+		}
+	}
+	return parsed.String(), nil
+}
+
 // StartBackgroundLoops starts lightweight background tasks that should run with the service.
 func (s *Service) StartBackgroundLoops(ctx context.Context) {
 	if s == nil {
@@ -487,7 +670,13 @@ func (s *Service) StartBackgroundLoops(ctx context.Context) {
 		return
 	}
 	if s.quotaAutoDisableScanner == nil {
-		s.quotaAutoDisableScanner = coreauth.NewQuotaAutoDisableScanner(s.coreManager, nil, cfg.AuthQuotaAutoDisable)
+		factory := s.quotaAutoDisableScannerFactory
+		if factory == nil {
+			factory = func(manager *coreauth.Manager, prober coreauth.QuotaProbeExecutor, cfg internalconfig.AuthQuotaAutoDisableConfig) quotaAutoDisableScanner {
+				return coreauth.NewQuotaAutoDisableScanner(manager, prober, cfg)
+			}
+		}
+		s.quotaAutoDisableScanner = factory(s.coreManager, &serviceQuotaProbeExecutor{service: s}, cfg.AuthQuotaAutoDisable)
 	}
 	s.quotaAutoDisableScanner.Start(ctx)
 }
